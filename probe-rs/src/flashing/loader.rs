@@ -6,7 +6,6 @@ use probe_rs_target::{
     InstructionSet, MemoryRange, MemoryRegion, NvmRegion, RawFlashAlgorithm,
     TargetDescriptionSource,
 };
-use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::str::FromStr;
 use std::time::Duration;
@@ -22,10 +21,6 @@ use crate::flashing::{FlashLayout, FlashProgress, Format};
 use crate::memory::MemoryInterface;
 use crate::session::Session;
 
-/// Helper trait for object safety.
-pub trait ImageReader: Read + Seek {}
-impl<T> ImageReader for T where T: Read + Seek {}
-
 /// Load and parse a firmware in a particular format, and add it to the flash loader.
 ///
 /// Based on the image loader, probe-rs may apply certain transformations to the firmware.
@@ -35,7 +30,7 @@ pub trait ImageLoader {
         &self,
         flash_loader: &mut FlashLoader,
         session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError>;
 }
 
@@ -44,14 +39,14 @@ impl ImageLoader for Format {
         &self,
         flash_loader: &mut FlashLoader,
         session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError> {
         match self {
-            Format::Bin(options) => BinLoader(options.clone()).load(flash_loader, session, file),
-            Format::Elf(options) => ElfLoader(options.clone()).load(flash_loader, session, file),
-            Format::Hex => HexLoader.load(flash_loader, session, file),
-            Format::Idf(options) => IdfLoader(options.clone()).load(flash_loader, session, file),
-            Format::Uf2 => Uf2Loader.load(flash_loader, session, file),
+            Format::Bin(options) => BinLoader(options.clone()).load(flash_loader, session, data),
+            Format::Elf(options) => ElfLoader(options.clone()).load(flash_loader, session, data),
+            Format::Hex => HexLoader.load(flash_loader, session, data),
+            Format::Idf(options) => IdfLoader(options.clone()).load(flash_loader, session, data),
+            Format::Uf2 => Uf2Loader.load(flash_loader, session, data),
         }
     }
 }
@@ -64,19 +59,16 @@ impl ImageLoader for BinLoader {
         &self,
         flash_loader: &mut FlashLoader,
         _session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError> {
         // Skip the specified bytes.
-        file.seek(SeekFrom::Start(u64::from(self.0.skip)))?;
-
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
+        let bytes = data.get(self.0.skip as usize..).unwrap_or_default();
 
         flash_loader.add_data(
             // If no base address is specified use the start of the boot memory.
             // TODO: Implement this as soon as we know targets.
             self.0.base_address.unwrap_or_default(),
-            &buf,
+            &bytes,
         )?;
 
         Ok(())
@@ -92,14 +84,12 @@ impl ImageLoader for ElfLoader {
         &self,
         flash_loader: &mut FlashLoader,
         session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError> {
         const VECTOR_TABLE_SECTION_NAME: &str = ".vector_table";
-        let mut elf_buffer = Vec::new();
-        file.read_to_end(&mut elf_buffer)?;
 
-        check_chip_compatibility_from_elf_metadata(session, &elf_buffer)?;
-        let extracted_data = extract_from_elf(&elf_buffer, &self.0)?;
+        check_chip_compatibility_from_elf_metadata(session, data)?;
+        let extracted_data = extract_from_elf(data, &self.0)?;
 
         if extracted_data.is_empty() {
             tracing::warn!("No loadable segments were found in the ELF file.");
@@ -142,12 +132,13 @@ impl ImageLoader for HexLoader {
         &self,
         flash_loader: &mut FlashLoader,
         _session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError> {
         let mut base_address = 0;
 
-        let mut data = String::new();
-        file.read_to_string(&mut data)?;
+        let data = std::str::from_utf8(data).map_err(|_| {
+            FileDownloadError::IhexRead(ihex::ReaderError::ContainsInvalidCharacters)
+        })?;
 
         for record in ihex::Reader::new(&data) {
             match record? {
@@ -180,12 +171,9 @@ impl ImageLoader for Uf2Loader {
         &self,
         flash_loader: &mut FlashLoader,
         _session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError> {
-        let mut uf2_buffer = Vec::new();
-        file.read_to_end(&mut uf2_buffer)?;
-
-        let (converted, family_to_target) = uf2_decode::convert_from_uf2(&uf2_buffer).unwrap();
+        let (converted, family_to_target) = uf2_decode::convert_from_uf2(&data).unwrap();
         let target_addresses = family_to_target.values();
         let num_sections = family_to_target.len();
 
@@ -216,7 +204,7 @@ impl ImageLoader for IdfLoader {
         &self,
         flash_loader: &mut FlashLoader,
         session: &mut Session,
-        file: &mut dyn ImageReader,
+        data: &[u8],
     ) -> Result<(), FileDownloadError> {
         let target = session.target();
         let target_name = target
@@ -277,16 +265,13 @@ impl ImageLoader for IdfLoader {
             chip.default_xtal_frequency(),
         );
 
-        let mut elf_buffer = Vec::new();
-        file.read_to_end(&mut elf_buffer)?;
-
-        check_idf_bootloader(&elf_buffer).map_err(|e| {
+        check_idf_bootloader(&data.to_vec()).map_err(|e| {
             FileDownloadError::Idf(espflash::Error::AppDescriptorNotPresent(e.to_string()))
         })?;
-        check_chip_compatibility_from_elf_metadata(session, &elf_buffer)?;
+        check_chip_compatibility_from_elf_metadata(session, data)?;
 
         let image = IdfBootloaderFormat::new(
-            &elf_buffer,
+            data,
             &flash_data,
             self.0.partition_table.as_deref(),
             self.0.bootloader.as_deref(),
@@ -448,10 +433,10 @@ impl FlashLoader {
     }
 
     /// Reads the image according to the file format and adds it to the loader.
-    pub fn load_image<T: Read + Seek>(
+    pub fn load_image(
         &mut self,
         session: &mut Session,
-        file: &mut T,
+        data: &[u8],
         format: Format,
         image_instruction_set: Option<InstructionSet>,
     ) -> Result<(), FileDownloadError> {
@@ -485,7 +470,7 @@ impl FlashLoader {
             }
         }
 
-        format.load(self, session, file)
+        format.load(self, session, data)
     }
 
     /// Verifies data on the device.

@@ -13,7 +13,6 @@ use crate::util::rtt::ChannelMode;
 use anyhow::{Context, anyhow};
 use libtest_mimic::{Arguments, FormatSetting};
 use object::{Object, ObjectSection, ObjectSymbol, Section, Symbol, SymbolKind};
-use probe_rs::flashing::FileDownloadError;
 use std::fs::File;
 use std::io::Read;
 use time::UtcOffset;
@@ -439,7 +438,7 @@ impl<'a> ElfReader<'a> {
 
 impl EmbeddedTestElfInfo {
     pub(crate) fn from_elf(path: &Path) -> anyhow::Result<Option<Self>> {
-        let mut file = File::open(path).map_err(FileDownloadError::IO)?;
+        let mut file = File::open(path)?;
 
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)?;

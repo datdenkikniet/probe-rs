@@ -7,7 +7,6 @@ use probe_rs_target::{InstructionSet, MemoryRange};
 use serde::{Deserialize, Serialize};
 
 use std::{
-    fs::File,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -246,22 +245,18 @@ impl DownloadOptions<'_> {
     }
 }
 
-/// Builds a new flash loader for the given target and path. This
-/// will check the path for validity and check what pages have to be
-/// flashed etc.
+/// Builds a new flash loader for the given target and data. This
+/// will check what pages have to be flashed etc.
 pub fn build_loader(
     session: &mut Session,
-    path: impl AsRef<Path>,
+    data: &[u8],
     format: Format,
     image_instruction_set: Option<InstructionSet>,
 ) -> Result<FlashLoader, FileDownloadError> {
     // Create the flash loader
     let mut loader = session.target().flash_loader();
 
-    // Add data from the BIN.
-    let mut file = File::open(path).map_err(FileDownloadError::IO)?;
-
-    loader.load_image(session, &mut file, format, image_instruction_set)?;
+    loader.load_image(session, data, format, image_instruction_set)?;
 
     Ok(loader)
 }
@@ -290,7 +285,8 @@ pub fn download_file_with_options(
     format: impl Into<Format>,
     options: DownloadOptions,
 ) -> Result<(), FileDownloadError> {
-    let loader = build_loader(session, path, format.into(), None)?;
+    let data = std::fs::read(path).map_err(FileDownloadError::IO)?;
+    let loader = build_loader(session, &data, format.into(), None)?;
 
     loader
         .commit(session, options)

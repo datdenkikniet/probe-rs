@@ -139,7 +139,8 @@ pub fn build_loader(
         }),
     };
 
-    probe_rs::flashing::build_loader(session, path, format, image_instruction_set)
+    let data = std::fs::read(path).map_err(FileDownloadError::IO)?;
+    probe_rs::flashing::build_loader(session, &data, format, image_instruction_set)
 }
 
 #[derive(Default)]
